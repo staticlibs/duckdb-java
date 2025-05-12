@@ -63,7 +63,7 @@ jobs:
           git checkout vendoring-${{ github.ref_name }}
           git rebase ${{ github.ref_name }}
           # Call the vendoring script in the engine
-          git rm -rf src/duckdb
+          rm -rf src/duckdb
           python vendor.py --duckdb .git/duckdb
           git add src/duckdb CMakeLists.txt
           # Clean up
