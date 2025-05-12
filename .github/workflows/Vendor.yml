@@ -75,7 +75,12 @@ jobs:
         if: ${{ steps.vendor.outcome == 'success' }}
         id: check_for_changes
         run: |
-          git diff --exit-code || echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          if git diff --exit-code; then
+            echo "No vendoring changes detected, skipping the remaining of the job."
+          else
+            echo "Changes detected, proceeding with commit and push."
+            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Commit and push the changes
         id: commit_and_push
