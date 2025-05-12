@@ -65,7 +65,6 @@ jobs:
           # Call the vendoring script in the engine
           rm -rf src/duckdb
           python vendor.py --duckdb .git/duckdb
-          git add src/duckdb CMakeLists.txt
           # Clean up
           rm -rf .git/duckdb
           # Export vendor revision for use in later steps
@@ -87,6 +86,7 @@ jobs:
         if: ${{ steps.check_for_changes.outcome == 'success' && steps.check_for_changes.outputs.has_changes == 'true' }}
         run: |
           MSG="Update vendored DuckDB sources to ${{ steps.vendor.outputs.vendor_rev }}"
+          git add src/duckdb CMakeLists.txt
           git commit -m "${MSG}"
           git push -f origin vendoring-${{ github.ref_name }}
           echo "commit_msg=${MSG}" >> "${GITHUB_OUTPUT}"
