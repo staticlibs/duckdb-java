@@ -118,7 +118,7 @@ final class DuckDBScalarFunctionAdapter {
             DuckDBReadableVector in = ctx.input(0);
             DuckDBWritableVector out = ctx.output();
             long rowCount = ctx.rowCount();
-            boolean propagateNulls = ctx.propagateNulls();
+            boolean propagateNulls = ctx.nullsPropagated();
             for (long row = 0; row < rowCount; row++) {
                 if (propagateNulls && in.isNull(row)) {
                     out.setNull(row);
@@ -144,7 +144,7 @@ final class DuckDBScalarFunctionAdapter {
             DuckDBReadableVector right = ctx.input(1);
             DuckDBWritableVector out = ctx.output();
             long rowCount = ctx.rowCount();
-            boolean propagateNulls = ctx.propagateNulls();
+            boolean propagateNulls = ctx.nullsPropagated();
             for (long row = 0; row < rowCount; row++) {
                 boolean leftIsNull = left.isNull(row);
                 boolean rightIsNull = right.isNull(row);
@@ -162,7 +162,7 @@ final class DuckDBScalarFunctionAdapter {
 
     static DuckDBScalarFunction intUnary(IntUnaryOperator function) {
         return ctx -> {
-            if (!ctx.propagateNulls()) {
+            if (!ctx.nullsPropagated()) {
                 throw new IllegalStateException("withIntFunction requires propagateNulls(true)");
             }
             DuckDBReadableVector in = ctx.input(0);
@@ -180,7 +180,7 @@ final class DuckDBScalarFunctionAdapter {
 
     static DuckDBScalarFunction intBinary(IntBinaryOperator function) {
         return ctx -> {
-            if (!ctx.propagateNulls()) {
+            if (!ctx.nullsPropagated()) {
                 throw new IllegalStateException("withIntFunction requires propagateNulls(true)");
             }
             DuckDBReadableVector left = ctx.input(0);
@@ -199,7 +199,7 @@ final class DuckDBScalarFunctionAdapter {
 
     static DuckDBScalarFunction doubleUnary(DoubleUnaryOperator function) {
         return ctx -> {
-            if (!ctx.propagateNulls()) {
+            if (!ctx.nullsPropagated()) {
                 throw new IllegalStateException("withDoubleFunction requires propagateNulls(true)");
             }
             DuckDBReadableVector in = ctx.input(0);
@@ -217,7 +217,7 @@ final class DuckDBScalarFunctionAdapter {
 
     static DuckDBScalarFunction doubleBinary(DoubleBinaryOperator function) {
         return ctx -> {
-            if (!ctx.propagateNulls()) {
+            if (!ctx.nullsPropagated()) {
                 throw new IllegalStateException("withDoubleFunction requires propagateNulls(true)");
             }
             DuckDBReadableVector left = ctx.input(0);
@@ -236,7 +236,7 @@ final class DuckDBScalarFunctionAdapter {
 
     static DuckDBScalarFunction longUnary(LongUnaryOperator function) {
         return ctx -> {
-            if (!ctx.propagateNulls()) {
+            if (!ctx.nullsPropagated()) {
                 throw new IllegalStateException("withLongFunction requires propagateNulls(true)");
             }
             DuckDBReadableVector in = ctx.input(0);
@@ -254,7 +254,7 @@ final class DuckDBScalarFunctionAdapter {
 
     static DuckDBScalarFunction longBinary(LongBinaryOperator function) {
         return ctx -> {
-            if (!ctx.propagateNulls()) {
+            if (!ctx.nullsPropagated()) {
                 throw new IllegalStateException("withLongFunction requires propagateNulls(true)");
             }
             DuckDBReadableVector left = ctx.input(0);
@@ -299,7 +299,7 @@ final class DuckDBScalarFunctionAdapter {
             DuckDBWritableVector out = ctx.output();
             long rowCount = ctx.rowCount();
             int vectorCount = Math.toIntExact(ctx.columnCount());
-            boolean propagateNulls = ctx.propagateNulls();
+            boolean propagateNulls = ctx.nullsPropagated();
             DuckDBReadableVector[] vectors = new DuckDBReadableVector[vectorCount];
             TypeCodec[] codecs = new TypeCodec[vectorCount];
             for (int column = 0; column < vectorCount; column++) {

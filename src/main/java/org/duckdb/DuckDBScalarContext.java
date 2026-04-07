@@ -7,7 +7,7 @@ import java.util.stream.Stream;
 public final class DuckDBScalarContext {
     private final DuckDBDataChunkReader input;
     private final DuckDBWritableVector output;
-    private final boolean propagateNulls;
+    private boolean propagateNulls;
 
     DuckDBScalarContext(DuckDBDataChunkReader input, DuckDBWritableVector output, boolean propagateNulls) {
         if (input == null) {
@@ -37,8 +37,13 @@ public final class DuckDBScalarContext {
         return output;
     }
 
-    public boolean propagateNulls() {
+    public boolean nullsPropagated() {
         return propagateNulls;
+    }
+
+    public DuckDBScalarContext propagateNulls(boolean propagateNulls) {
+        this.propagateNulls = propagateNulls;
+        return this;
     }
 
     DuckDBDataChunkReader inputChunk() {

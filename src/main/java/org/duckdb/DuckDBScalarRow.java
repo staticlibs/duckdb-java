@@ -27,6 +27,18 @@ public final class DuckDBScalarRow {
 
     public boolean getBoolean(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getBoolean(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("BOOLEAN", columnIndex, exception);
+        }
+    }
+
+    public boolean getBoolean(int columnIndex, boolean defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getBoolean(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("BOOLEAN", columnIndex, exception);
@@ -35,6 +47,18 @@ public final class DuckDBScalarRow {
 
     public byte getByte(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getByte(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("TINYINT", columnIndex, exception);
+        }
+    }
+
+    public byte getByte(int columnIndex, byte defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getByte(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("TINYINT", columnIndex, exception);
@@ -43,6 +67,18 @@ public final class DuckDBScalarRow {
 
     public short getShort(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getShort(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("SMALLINT", columnIndex, exception);
+        }
+    }
+
+    public short getShort(int columnIndex, short defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getShort(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("SMALLINT", columnIndex, exception);
@@ -51,6 +87,18 @@ public final class DuckDBScalarRow {
 
     public short getUint8(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getUint8(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("UTINYINT", columnIndex, exception);
+        }
+    }
+
+    public short getUint8(int columnIndex, short defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getUint8(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("UTINYINT", columnIndex, exception);
@@ -59,6 +107,18 @@ public final class DuckDBScalarRow {
 
     public int getUint16(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getUint16(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("USMALLINT", columnIndex, exception);
+        }
+    }
+
+    public int getUint16(int columnIndex, int defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getUint16(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("USMALLINT", columnIndex, exception);
@@ -67,6 +127,18 @@ public final class DuckDBScalarRow {
 
     public int getInt(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getInt(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("INTEGER", columnIndex, exception);
+        }
+    }
+
+    public int getInt(int columnIndex, int defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getInt(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("INTEGER", columnIndex, exception);
@@ -75,6 +147,18 @@ public final class DuckDBScalarRow {
 
     public long getUint32(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getUint32(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("UINTEGER", columnIndex, exception);
+        }
+    }
+
+    public long getUint32(int columnIndex, long defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getUint32(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("UINTEGER", columnIndex, exception);
@@ -83,6 +167,18 @@ public final class DuckDBScalarRow {
 
     public long getLong(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getLong(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("BIGINT", columnIndex, exception);
+        }
+    }
+
+    public long getLong(int columnIndex, long defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getLong(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("BIGINT", columnIndex, exception);
@@ -91,6 +187,9 @@ public final class DuckDBScalarRow {
 
     public BigInteger getUint64(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getUint64(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("UBIGINT", columnIndex, exception);
@@ -99,6 +198,18 @@ public final class DuckDBScalarRow {
 
     public float getFloat(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getFloat(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("FLOAT", columnIndex, exception);
+        }
+    }
+
+    public float getFloat(int columnIndex, float defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getFloat(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("FLOAT", columnIndex, exception);
@@ -107,6 +218,18 @@ public final class DuckDBScalarRow {
 
     public double getDouble(int columnIndex) {
         try {
+            checkNotNull(columnIndex, rowIndex);
+            return input(columnIndex).getDouble(rowIndex);
+        } catch (SQLException exception) {
+            throw readFailure("DOUBLE", columnIndex, exception);
+        }
+    }
+
+    public double getDouble(int columnIndex, double defaultVal) {
+        try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return defaultVal;
+            }
             return input(columnIndex).getDouble(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("DOUBLE", columnIndex, exception);
@@ -115,6 +238,9 @@ public final class DuckDBScalarRow {
 
     public LocalDate getLocalDate(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getLocalDate(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("DATE", columnIndex, exception);
@@ -123,6 +249,9 @@ public final class DuckDBScalarRow {
 
     public java.sql.Date getDate(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getDate(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("DATE", columnIndex, exception);
@@ -131,6 +260,9 @@ public final class DuckDBScalarRow {
 
     public LocalDateTime getLocalDateTime(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getLocalDateTime(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("TIMESTAMP", columnIndex, exception);
@@ -139,6 +271,9 @@ public final class DuckDBScalarRow {
 
     public Timestamp getTimestamp(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getTimestamp(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("TIMESTAMP", columnIndex, exception);
@@ -147,6 +282,9 @@ public final class DuckDBScalarRow {
 
     public OffsetDateTime getOffsetDateTime(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getOffsetDateTime(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("TIMESTAMP WITH TIME ZONE", columnIndex, exception);
@@ -155,6 +293,9 @@ public final class DuckDBScalarRow {
 
     public BigDecimal getBigDecimal(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getBigDecimal(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("DECIMAL", columnIndex, exception);
@@ -163,6 +304,9 @@ public final class DuckDBScalarRow {
 
     public String getString(int columnIndex) {
         try {
+            if (input(columnIndex).isNull(rowIndex)) {
+                return null;
+            }
             return input(columnIndex).getString(rowIndex);
         } catch (SQLException exception) {
             throw readFailure("VARCHAR", columnIndex, exception);
@@ -356,5 +500,12 @@ public final class DuckDBScalarRow {
 
     private IllegalStateException writeFailure(String type, SQLException exception) {
         return new IllegalStateException("Failed to write " + type + " to output row " + rowIndex, exception);
+    }
+
+    private void checkNotNull(int columnIndex, long rowIndex) {
+        if (input(columnIndex).isNull(rowIndex)) {
+            throw new IllegalStateException("Primitive value on column: " + columnIndex + ", row: " + rowIndex +
+                                            " is NULL");
+        }
     }
 }

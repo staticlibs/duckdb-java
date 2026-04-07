@@ -32,7 +32,7 @@ public final class DuckDBScalarFunctionBuilder implements AutoCloseable {
     private final List<Class<?>> parameterJavaTypes = new ArrayList<>();
     private boolean volatileFlag;
     private boolean specialHandlingFlag;
-    private boolean propagateNullsFlag = true;
+    private boolean propagateNullsFlag;
     private boolean callbackRequiresNullPropagation;
     private boolean finalized;
 
@@ -117,19 +117,6 @@ public final class DuckDBScalarFunctionBuilder implements AutoCloseable {
             throw new SQLException("Scalar function callback cannot be null");
         }
         return setCallback(function, false);
-    }
-
-    public DuckDBScalarFunctionBuilder propagateNulls(boolean propagateNulls) throws SQLException {
-        ensureNotFinalized();
-        if (!propagateNulls && callbackRequiresNullPropagation) {
-            throw new SQLException("Primitive scalar callbacks require propagateNulls(true)");
-        }
-        this.propagateNullsFlag = propagateNulls;
-        if (callback != null) {
-            duckdb_scalar_function_set_function(scalarFunctionRef,
-                                                new DuckDBScalarFunctionWrapper(callback, propagateNullsFlag));
-        }
-        return this;
     }
 
     public DuckDBScalarFunctionBuilder withIntFunction(IntUnaryOperator function) throws SQLException {
@@ -405,16 +392,13 @@ public final class DuckDBScalarFunctionBuilder implements AutoCloseable {
     private DuckDBScalarFunctionBuilder setCallback(DuckDBScalarFunction function, boolean requiresNullPropagation)
         throws SQLException {
         this.callback = function;
-        this.callbackRequiresNullPropagation = requiresNullPropagation;
+        this.propagateNullsFlag = requiresNullPropagation;
         duckdb_scalar_function_set_function(scalarFunctionRef,
                                             new DuckDBScalarFunctionWrapper(function, propagateNullsFlag));
         return this;
     }
 
     private void ensurePrimitiveCallbackCompatible(String callbackMethodName) throws SQLException {
-        if (!propagateNullsFlag) {
-            throw new SQLException(callbackMethodName + " requires propagateNulls(true)");
-        }
         if (varArgType != null) {
             throw new SQLException(callbackMethodName + " does not support varargs; use withVarArgsFunction instead");
         }
