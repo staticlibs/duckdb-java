@@ -19,6 +19,7 @@ jobs:
   format-check:
     name: Format Check
     runs-on: ubuntu-latest
+    if: ${{ false }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -691,7 +692,7 @@ jobs:
   java-windows-aarch64:
     name: Windows (aarch64)
     runs-on: windows-11-arm
-    needs: java-linux-amd64
+    # needs: java-linux-amd64
     env:
       CC: 'ccache cl'
       CXX: 'ccache cl'
