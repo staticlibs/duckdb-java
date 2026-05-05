@@ -630,6 +630,7 @@ jobs:
         run: |
           choco install \
             ccache \
+            cmake \
             -y --force --no-progress
 
       - name: Cache Key
