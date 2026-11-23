@@ -53,6 +53,15 @@ set(DUCKDB_SRC_FILES
 set(JEMALLOC_SRC_FILES 
   ${JEMALLOC_SOURCES})
 
+# DuckDB C++ Stable API, copied by vendor.py from tools/cpp in the DuckDB sources,
+# it is compiled into the driver on top of the C API v2 that is part of the engine sources
+
+set(DUCKDB_CPP_API_INCLUDE_DIRS
+  src/duckdb/tools/cpp)
+
+set(DUCKDB_CPP_API_SRC_FILES
+  src/duckdb/tools/cpp/duckdb_cpp.cpp)
+
 
 # a few OS-specific variables
 
@@ -152,17 +161,20 @@ add_library(duckdb_java SHARED
   src/jni/bindings_vector.cpp
   src/jni/bindings_value.cpp
   src/jni/config.cpp
+  src/jni/cxx_api.cpp
   src/jni/duckdb_java.cpp
   src/jni/functions.cpp
   src/jni/holders.cpp
   src/jni/refs.cpp
   src/jni/types.cpp
   src/jni/util.cpp
+  ${DUCKDB_CPP_API_SRC_FILES}
   ${DUCKDB_SRC_FILES})
 
 target_include_directories(duckdb_java PRIVATE
   ${JAVA_INCLUDE_PATH}
   ${JAVA_INCLUDE_PATH2}
+  ${DUCKDB_CPP_API_INCLUDE_DIRS}
   ${DUCKDB_INCLUDE_DIRS})
 
 if(JEMALLOC_ENABLED)

@@ -3,16 +3,21 @@
 #include "util.hpp"
 
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
-static duckdb_vector vector_buf_to_vector(JNIEnv *env, jobject vector_buf) {
+/*
+ * Vectors are passed to Java as the underlying handles of the (non-owning) cxx::Vector wrappers.
+ */
+static void *vector_buf_to_vector(JNIEnv *env, jobject vector_buf) {
 
 	if (vector_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid vector buffer");
 		return nullptr;
 	}
 
-	duckdb_vector vector = reinterpret_cast<duckdb_vector>(env->GetDirectBufferAddress(vector_buf));
+	void *vector = env->GetDirectBufferAddress(vector_buf);
 
 	if (vector == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid vector");
@@ -20,6 +25,51 @@ static duckdb_vector vector_buf_to_vector(JNIEnv *env, jobject vector_buf) {
 	}
 
 	return vector;
+}
+
+static jobject make_vector_buf(JNIEnv *env, const cxx::Vector &vector) {
+	return make_ptr_buf(env, cxx_raw_handle(vector));
+}
+
+/*
+ * In the C++ API vectors are always borrowed from data chunks, standalone vectors created with
+ * duckdb_create_vector are backed by single-column data chunks that are kept here until the vector is destroyed.
+ */
+static std::mutex standalone_vectors_lock;
+static std::unordered_map<void *, std::unique_ptr<cxx::DataChunk>> standalone_vectors;
+
+/*
+ * Same as in C API v1, returns the data of FLAT and CONSTANT vectors, nullptr otherwise.
+ */
+static void *vector_get_data(void *vec) {
+	try {
+		return cxx_wrap<cxx::Vector>(vec).GetDataMutable();
+	} catch (const std::exception &) {
+		return nullptr;
+	}
+}
+
+/*
+ * Same as in C API v1, returns the validity mask of FLAT and CONSTANT vectors, the mask can be nullptr if all rows are
+ * valid. Returns nullptr for other vector types.
+ */
+static uint64_t *vector_get_validity(void *vec) {
+	try {
+		auto vector = cxx_wrap<cxx::Vector>(vec);
+		switch (vector.GetVectorType()) {
+		case cxx::VectorType::FLAT:
+		case cxx::VectorType::CONSTANT:
+			return const_cast<uint64_t *>(vector.GetView().validity);
+		default:
+			return nullptr;
+		}
+	} catch (const std::exception &) {
+		return nullptr;
+	}
+}
+
+static void vector_ensure_validity_writable(void *vec) {
+	cxx_wrap<cxx::Vector>(vec).GetValidityMutable();
 }
 
 /*
@@ -35,7 +85,7 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_
 		env->ThrowNew(J_SQLException, "Invalid vector data buffer");
 		return nullptr;
 	}
-	auto data = reinterpret_cast<duckdb_string_t *>(env->GetDirectBufferAddress(vector_data));
+	auto data = reinterpret_cast<cxx::varchar_t *>(env->GetDirectBufferAddress(vector_data));
 	if (data == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid vector data");
 		return nullptr;
@@ -45,8 +95,8 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_
 		return nullptr;
 	}
 	auto &string_value = data[row_idx];
-	auto string_len = duckdb_string_t_length(string_value);
-	auto string_ptr = duckdb_string_t_data(&string_value);
+	auto string_len = string_value.size();
+	auto string_ptr = string_value.data();
 	return make_jbyteArray(env, string_ptr, string_len);
 }
 
@@ -64,16 +114,26 @@ Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1string__Ljava_nio_ByteBuffer
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1vector(JNIEnv *env, jclass,
                                                                                 jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	idx_t cap = duckdb_vector_size();
-
-	duckdb_vector vec = duckdb_create_vector(lt, cap);
-
-	return make_ptr_buf(env, vec);
+	try {
+		if (!*lt) {
+			return nullptr;
+		}
+		std::vector<cxx::LogicalType> types;
+		types.emplace_back(lt->Copy());
+		// the chunk is created with the standard vector size capacity
+		auto chunk = std::unique_ptr<cxx::DataChunk>(new cxx::DataChunk(default_factory(), types));
+		void *vec = cxx_raw_handle(chunk->GetVector(0));
+		std::lock_guard<std::mutex> guard(standalone_vectors_lock);
+		standalone_vectors.emplace(vec, std::move(chunk));
+		return make_ptr_buf(env, vec);
+	} catch (const std::exception &) {
+		return nullptr;
+	}
 }
 
 /*
@@ -83,12 +143,21 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1vector(
  */
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1vector(JNIEnv *env, jclass, jobject vector) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_destroy_vector(&vec);
+	std::unique_ptr<cxx::DataChunk> chunk;
+	{
+		std::lock_guard<std::mutex> guard(standalone_vectors_lock);
+		auto it = standalone_vectors.find(vec);
+		if (it == standalone_vectors.end()) {
+			return;
+		}
+		chunk = std::move(it->second);
+		standalone_vectors.erase(it);
+	}
 }
 
 /*
@@ -99,14 +168,18 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1vector(JN
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1column_1type(JNIEnv *env, jclass,
                                                                                            jobject vector) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec_handle = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	duckdb_logical_type lt = duckdb_vector_get_column_type(vec);
-
-	return make_ptr_buf(env, lt);
+	try {
+		auto vec = cxx_wrap<cxx::Vector>(vec_handle);
+		return make_logical_type_buf(env, vec.GetLogicalType());
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }
 
 /*
@@ -117,7 +190,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1co
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1data(JNIEnv *env, jclass, jobject vector,
                                                                                    jlong size_bytes) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -126,7 +199,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1da
 		return nullptr;
 	}
 
-	void *data = duckdb_vector_get_data(vec);
+	void *data = vector_get_data(vec);
 
 	if (data != nullptr) {
 		return make_data_buf(env, data, vector_size);
@@ -144,7 +217,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1da
                                                                                            jobject vector,
                                                                                            jlong size_bytes) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -153,7 +226,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1da
 		return nullptr;
 	}
 
-	void *data = duckdb_vector_get_data(vec);
+	void *data = vector_get_data(vec);
 
 	if (data == nullptr) {
 		return nullptr;
@@ -173,7 +246,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1va
                                                                                        jobject vector,
                                                                                        jlong vector_size_elems) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -183,7 +256,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1va
 		return nullptr;
 	}
 
-	uint64_t *mask = duckdb_vector_get_validity(vec);
+	uint64_t *mask = vector_get_validity(vec);
 	idx_t vector_size_rounded = vector_size;
 	if (vector_size % 64 != 0) {
 		vector_size_rounded += 64 - (vector_size % 64);
@@ -201,12 +274,16 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1get_1va
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1ensure_1validity_1writable(JNIEnv *env, jclass,
                                                                                                  jobject vector) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_vector_ensure_validity_writable(vec);
+	try {
+		vector_ensure_validity_writable(vec);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+	}
 }
 
 /*
@@ -219,7 +296,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1assign_1st
                                                                                                    jlong index,
                                                                                                    jbyteArray str) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -234,7 +311,22 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1assign_1st
 
 	idx_t len = static_cast<idx_t>(env->GetArrayLength(str));
 
-	duckdb_vector_assign_string_element_len(vec, idx, str_ptr.get(), len);
+	try {
+		auto vector = cxx_wrap<cxx::Vector>(vec);
+		std::string_view data(str_ptr.get(), len);
+		// same as in C API v1, invalid UTF-8 strings in VARCHAR vectors are set to NULL
+		if (vector.GetLogicalType().GetTypeId() == cxx::LogicalTypeId::VARCHAR) {
+			try {
+				cxx::ValidateUTF8(data);
+			} catch (const cxx::InvalidInputException &) {
+				vector.GetValidityMutable().SetInvalid(idx);
+				return;
+			}
+		}
+		vector.AssignStringUnsafe(idx, data);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+	}
 }
 
 /*
@@ -251,7 +343,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1assign_1st
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1assign_1string_1elements(
     JNIEnv *env, jclass, jobject vector, jlong index, jbyteArray data, jlongArray lengths, jint data_length) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -290,31 +382,40 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1assign_1st
 		env->ThrowNew(J_SQLException, "String batch length does not match payload");
 		return;
 	}
-	auto error = duckdb_valid_utf8_check(payload.get(), static_cast<idx_t>(payload_length));
-	if (error != nullptr) {
-		duckdb_destroy_error_data(&error);
+	try {
+		cxx::ValidateUTF8(std::string_view(payload.get(), static_cast<idx_t>(payload_length)));
+	} catch (const cxx::InvalidInputException &) {
 		env->ReleaseLongArrayElements(lengths, lens, JNI_ABORT);
 		env->ThrowNew(J_SQLException, "Invalid UTF-8 string batch");
 		return;
 	}
-	duckdb_vector_ensure_validity_writable(vec);
-	uint64_t *validity = duckdb_vector_get_validity(vec);
-	if (validity == nullptr) {
-		env->ReleaseLongArrayElements(lengths, lens, JNI_ABORT);
-		env->ThrowNew(J_SQLException, "Invalid validity mask");
-		return;
-	}
-	const char *p = payload.get();
-	for (jint i = 0; i < count; i++) {
-		jlong len = lens[i];
-		idx_t row = row_idx + static_cast<idx_t>(i);
-		if (len < 0) {
-			duckdb_validity_set_row_validity(validity, row, false);
-			continue;
+	try {
+		auto vector = cxx_wrap<cxx::Vector>(vec);
+		cxx::ValidityMask validity = vector.GetValidityMutable();
+		if (validity.words == nullptr) {
+			env->ReleaseLongArrayElements(lengths, lens, JNI_ABORT);
+			env->ThrowNew(J_SQLException, "Invalid validity mask");
+			return;
 		}
-		duckdb_unsafe_vector_assign_string_element_len(vec, row, p, static_cast<idx_t>(len));
-		p += len;
-		duckdb_validity_set_row_validity(validity, row, true);
+		auto data = vector.GetDataMutable<cxx::varchar_t>();
+		auto heap = vector.GetHeap();
+		const char *p = payload.get();
+		for (jint i = 0; i < count; i++) {
+			jlong len = lens[i];
+			idx_t row = row_idx + static_cast<idx_t>(i);
+			if (len < 0) {
+				validity.SetInvalid(row);
+				continue;
+			}
+			auto bytes = heap.AddBlob(std::string_view(p, static_cast<idx_t>(len)));
+			data[row] = cxx::varchar_t(bytes.data(), bytes.size());
+			p += len;
+			validity.SetValid(row);
+		}
+	} catch (const std::exception &e) {
+		env->ReleaseLongArrayElements(lengths, lens, JNI_ABORT);
+		throw_sql_exception(env, e);
+		return;
 	}
 	env->ReleaseLongArrayElements(lengths, lens, JNI_ABORT);
 }
@@ -327,14 +428,17 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1vector_1assign_1st
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1get_1child(JNIEnv *env, jclass,
                                                                                           jobject vector) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	duckdb_vector res = duckdb_list_vector_get_child(vec);
-
-	return make_ptr_buf(env, res);
+	try {
+		return make_vector_buf(env, cxx_wrap<cxx::Vector>(vec).GetChild(0));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }
 
 /*
@@ -345,14 +449,19 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1g
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1get_1size(JNIEnv *env, jclass,
                                                                                        jobject vector) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	idx_t size = duckdb_list_vector_get_size(vec);
-
-	return uint64_to_jlong(size);
+	try {
+		// the size of a list is the size of its child vector
+		idx_t size = cxx_wrap<cxx::Vector>(vec).GetChild(0).GetSize();
+		return uint64_to_jlong(size);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -363,7 +472,7 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1get
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1set_1size(JNIEnv *env, jclass,
                                                                                       jobject vector, jlong size) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
@@ -372,9 +481,13 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1set_
 		return -1;
 	}
 
-	duckdb_state state = duckdb_list_vector_set_size(vec, size_idx);
-
-	return static_cast<jint>(state);
+	try {
+		// sets the size of the child vector, reserving the space for it if necessary
+		cxx_wrap<cxx::Vector>(vec).GetChild(0).SetSize(size_idx);
+		return static_cast<jint>(CAPI_STATE_SUCCESS);
+	} catch (const std::exception &) {
+		return static_cast<jint>(CAPI_STATE_ERROR);
+	}
 }
 
 /*
@@ -385,7 +498,7 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1set_
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1reserve(JNIEnv *env, jclass, jobject vector,
                                                                                     jlong capacity) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
@@ -394,9 +507,19 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1list_1vector_1rese
 		return -1;
 	}
 
-	duckdb_state state = duckdb_list_vector_reserve(vec, cap);
-
-	return static_cast<jint>(state);
+	try {
+		// The C++ API does not have a reserve-only call, the child vector is resized to the requested capacity,
+		// that reserves the space for it, and then its size is restored
+		auto child = cxx_wrap<cxx::Vector>(vec).GetChild(0);
+		idx_t size = child.GetSize();
+		if (cap > size) {
+			child.SetSize(cap);
+			child.SetSize(size);
+		}
+		return static_cast<jint>(CAPI_STATE_SUCCESS);
+	} catch (const std::exception &) {
+		return static_cast<jint>(CAPI_STATE_ERROR);
+	}
 }
 
 /*
@@ -408,7 +531,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1vector_
                                                                                             jobject vector,
                                                                                             jlong index) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -417,9 +540,12 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1vector_
 		return nullptr;
 	}
 
-	duckdb_vector res = duckdb_struct_vector_get_child(vec, idx);
-
-	return make_ptr_buf(env, res);
+	try {
+		return make_vector_buf(env, cxx_wrap<cxx::Vector>(vec).GetChild(idx));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }
 
 /*
@@ -430,12 +556,15 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1vector_
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1array_1vector_1get_1child(JNIEnv *env, jclass,
                                                                                            jobject vector) {
 
-	duckdb_vector vec = vector_buf_to_vector(env, vector);
+	void *vec = vector_buf_to_vector(env, vector);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	duckdb_vector res = duckdb_array_vector_get_child(vec);
-
-	return make_ptr_buf(env, res);
+	try {
+		return make_vector_buf(env, cxx_wrap<cxx::Vector>(vec).GetChild(0));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }

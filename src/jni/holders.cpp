@@ -54,7 +54,7 @@ duckdb::Connection *get_connection(JNIEnv *env, jobject conn_ref_buf) {
 	return conn_ref;
 }
 
-duckdb_connection conn_ref_buf_to_conn(JNIEnv *env, jobject conn_ref_buf) {
+duckdb::capiv2::CV2Connection *conn_ref_buf_to_engine_conn(JNIEnv *env, jobject conn_ref_buf) {
 	if (conn_ref_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid connection buffer");
 		return nullptr;
@@ -69,8 +69,16 @@ duckdb_connection conn_ref_buf_to_conn(JNIEnv *env, jobject conn_ref_buf) {
 		env->ThrowNew(J_SQLException, "Invalid connection");
 		return nullptr;
 	}
+	return conn_ref;
+}
 
-	return reinterpret_cast<duckdb_connection>(conn_ref);
+std::unique_ptr<cxx::Connection> conn_ref_buf_to_conn(JNIEnv *env, jobject conn_ref_buf) {
+	auto conn_ref = conn_ref_buf_to_engine_conn(env, conn_ref_buf);
+	if (conn_ref == nullptr) {
+		return nullptr;
+	}
+	return std::unique_ptr<cxx::Connection>(
+	    new cxx::Connection(cxx::Connection::FromOpaque(duckdb::capiv2::Convert(conn_ref))));
 }
 
 AttachedJNIEnv::AttachedJNIEnv() {

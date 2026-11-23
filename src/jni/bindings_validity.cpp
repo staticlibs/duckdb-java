@@ -40,7 +40,7 @@ JNIEXPORT jboolean JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1validity_1row_
 		return false;
 	}
 
-	bool res = duckdb_validity_row_is_valid(val, row_idx);
+	bool res = cxx::ValidityMask {val}.RowIsValid(row_idx);
 
 	return static_cast<jboolean>(res);
 }
@@ -66,5 +66,10 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1validity_1set_1row
 
 	bool valid_flag = static_cast<bool>(valid);
 
-	duckdb_validity_set_row_validity(val, row_idx, valid_flag);
+	cxx::ValidityMask mask {val};
+	if (valid_flag) {
+		mask.SetValid(row_idx);
+	} else {
+		mask.SetInvalid(row_idx);
+	}
 }

@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import json
 import pickle
 import platform
@@ -35,6 +36,14 @@ defines = ['DUCKDB_EXTENSION_{}_LINKED'.format(ext.upper()) for ext in extension
 (source_list, include_list, original_sources) = package_build.build_package(target_dir, extensions, False)
 source_list = [sanitize_path(x) for x in source_list]
 include_list = [sanitize_path(x) for x in include_list]
+
+# the C++ Stable API is not a part of the DuckDB package, it is compiled into the driver
+# from the sources in tools/cpp, see DUCKDB_CPP_API_* variables in CMakeLists.txt.in
+cpp_api_dir = os.path.join('tools', 'cpp')
+cpp_api_target_dir = os.path.join(target_dir, cpp_api_dir)
+os.makedirs(cpp_api_target_dir, exist_ok=True)
+for cpp_api_file in ['duckdb_cpp.hpp', 'duckdb_cpp.cpp']:
+    shutil.copyfile(os.path.join(cpp_api_dir, cpp_api_file), os.path.join(cpp_api_target_dir, cpp_api_file))
 
 # process jemalloc separately with its own CMake vars
 jemalloc_source_list = [x for x in source_list if x.startswith("duckdb/third_party/jemalloc/")]

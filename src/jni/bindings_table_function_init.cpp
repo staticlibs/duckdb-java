@@ -1,14 +1,13 @@
-#include "bindings.hpp"
-#include "holders.hpp"
+#include "bindings_table_function.hpp"
 #include "refs.hpp"
 #include "util.hpp"
 
-static duckdb_init_info init_info_buf_to_init_info(JNIEnv *env, jobject init_info_buf) {
+static TableFunctionInitInfoHolder *init_info_buf_to_init_info(JNIEnv *env, jobject init_info_buf) {
 	if (init_info_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid table function init info buffer");
 		return nullptr;
 	}
-	auto init_info = reinterpret_cast<duckdb_init_info>(env->GetDirectBufferAddress(init_info_buf));
+	auto init_info = reinterpret_cast<TableFunctionInitInfoHolder *>(env->GetDirectBufferAddress(init_info_buf));
 	if (init_info == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid table function init info");
 		return nullptr;
@@ -24,18 +23,20 @@ static duckdb_init_info init_info_buf_to_init_info(JNIEnv *env, jobject init_inf
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1get_1bind_1data(JNIEnv *env, jclass,
                                                                                        jobject init_info) {
 
-	duckdb_init_info ii = init_info_buf_to_init_info(env, init_info);
+	auto ii = init_info_buf_to_init_info(env, init_info);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	void *bind_data = duckdb_init_get_bind_data(ii);
-	if (bind_data == nullptr) {
+	try {
+		if (ii->global_input != nullptr) {
+			return ii->global_input->GetBindData<TableFunctionState>().get_object();
+		}
+		return ii->local_input->GetBindData<TableFunctionState>().get_object();
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
 		return nullptr;
 	}
-
-	GlobalRefHolder *holder = reinterpret_cast<GlobalRefHolder *>(bind_data);
-	return holder->global_ref;
 }
 
 /*
@@ -50,7 +51,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1init_1d
 		return;
 	}
 
-	duckdb_init_info ii = init_info_buf_to_init_info(env, init_info);
+	auto ii = init_info_buf_to_init_info(env, init_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -60,7 +61,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1init_1d
 		return;
 	}
 
-	duckdb_init_set_init_data(ii, init_data_holder.release(), GlobalRefHolder::destroy_table_function_state);
+	ii->init_data = std::unique_ptr<TableFunctionState>(new TableFunctionState(init_data_holder.release()));
 }
 
 /*
@@ -71,12 +72,18 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1init_1d
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1get_1column_1count(JNIEnv *env, jclass,
                                                                                         jobject init_info) {
 
-	duckdb_init_info ii = init_info_buf_to_init_info(env, init_info);
+	auto ii = init_info_buf_to_init_info(env, init_info);
 	if (env->ExceptionCheck()) {
 		return 0;
 	}
 
-	idx_t count = duckdb_init_get_column_count(ii);
+	idx_t count = 0;
+	try {
+		count = ii->global_input != nullptr ? ii->global_input->GetColumnCount() : ii->local_input->GetColumnCount();
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return 0;
+	}
 	return uint64_to_jlong(count);
 }
 
@@ -89,7 +96,7 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1get_1column
                                                                                         jobject init_info,
                                                                                         jlong column_index) {
 
-	duckdb_init_info ii = init_info_buf_to_init_info(env, init_info);
+	auto ii = init_info_buf_to_init_info(env, init_info);
 	if (env->ExceptionCheck()) {
 		return 0;
 	}
@@ -99,7 +106,22 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1get_1column
 		return 0;
 	}
 
-	idx_t idx = duckdb_init_get_column_index(ii, column_index_idx);
+	idx_t idx = 0;
+	try {
+		// same as in C API v1, 0 is returned for an invalid index
+		if (ii->global_input != nullptr) {
+			if (column_index_idx < ii->global_input->GetColumnCount()) {
+				idx = ii->global_input->GetColumnIndex(column_index_idx);
+			}
+		} else {
+			if (column_index_idx < ii->local_input->GetColumnCount()) {
+				idx = ii->local_input->GetColumnIndex(column_index_idx);
+			}
+		}
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return 0;
+	}
 	return uint64_to_jlong(idx);
 }
 
@@ -112,7 +134,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1max_1th
                                                                                       jobject init_info,
                                                                                       jlong max_threads) {
 
-	duckdb_init_info ii = init_info_buf_to_init_info(env, init_info);
+	auto ii = init_info_buf_to_init_info(env, init_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -121,7 +143,15 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1max_1th
 		return;
 	}
 
-	duckdb_init_set_max_threads(ii, mt);
+	// the number of threads can only be set in the global init
+	if (ii->global_input == nullptr) {
+		return;
+	}
+	try {
+		ii->global_input->SetMaxThreads(mt);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+	}
 }
 
 /*
@@ -131,7 +161,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1max_1th
  */
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1error(JNIEnv *env, jclass, jobject init_info,
                                                                                jbyteArray error) {
-	duckdb_init_info ii = init_info_buf_to_init_info(env, init_info);
+	auto ii = init_info_buf_to_init_info(env, init_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -140,5 +170,6 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1init_1set_1error(J
 		return;
 	}
 
-	duckdb_init_set_error(ii, error_str.c_str());
+	ii->has_error = true;
+	ii->error = error_str;
 }

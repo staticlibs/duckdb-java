@@ -1,14 +1,16 @@
-#include "bindings.hpp"
-#include "holders.hpp"
+#include "bindings_table_function.hpp"
 #include "refs.hpp"
 #include "util.hpp"
 
-static duckdb_bind_info bind_info_buf_to_bind_info(JNIEnv *env, jobject bind_info_buf) {
+#include <algorithm>
+#include <cctype>
+
+static TableFunctionBindInfoHolder *bind_info_buf_to_bind_info(JNIEnv *env, jobject bind_info_buf) {
 	if (bind_info_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid table function bind info buffer");
 		return nullptr;
 	}
-	auto bind_info = reinterpret_cast<duckdb_bind_info>(env->GetDirectBufferAddress(bind_info_buf));
+	auto bind_info = reinterpret_cast<TableFunctionBindInfoHolder *>(env->GetDirectBufferAddress(bind_info_buf));
 	if (bind_info == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid table function bind info");
 		return nullptr;
@@ -26,7 +28,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1add_1result_
                                                                                         jbyteArray name,
                                                                                         jobject logical_type) {
 
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -38,12 +40,21 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1add_1result_
 		env->ThrowNew(J_SQLException, "Specified result column name must be not empty");
 		return;
 	}
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_bind_add_result_column(bi, name_str.c_str(), lt);
+	// same as in C API v1, INVALID and ANY types are ignored
+	auto type_id = logical_type_to_capi(*lt);
+	if (type_id == capi_type::INVALID || type_id == capi_type::ANY) {
+		return;
+	}
+	try {
+		bi->input.AddResultColumn(name_str, *lt);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+	}
 }
 
 /*
@@ -54,12 +65,19 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1add_1result_
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1get_1parameter_1count(JNIEnv *env, jclass,
                                                                                            jobject bind_info) {
 
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return 0;
 	}
 
-	idx_t count = duckdb_bind_get_parameter_count(bi);
+	idx_t count = 0;
+	try {
+		// the positional parameters
+		count = bi->input.GetArgumentCounts().NamedOffset();
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return 0;
+	}
 
 	return static_cast<jlong>(count);
 }
@@ -72,7 +90,7 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1get_1parame
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1get_1parameter(JNIEnv *env, jclass,
                                                                                       jobject bind_info, jlong index) {
 
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -81,9 +99,20 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1get_1para
 		return nullptr;
 	}
 
-	duckdb_value val = duckdb_bind_get_parameter(bi, index_idx);
-
-	return make_ptr_buf(env, val);
+	try {
+		if (index_idx >= bi->input.GetArgumentCounts().NamedOffset()) {
+			return nullptr;
+		}
+		auto val = new cxx::Value(bi->input.GetConstantArgument(index_idx));
+		jobject buf = make_ptr_buf(env, val);
+		if (buf == nullptr) {
+			delete val;
+		}
+		return buf;
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }
 
 /*
@@ -95,7 +124,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1get_1name
                                                                                              jobject bind_info,
                                                                                              jbyteArray name) {
 
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -104,9 +133,31 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1get_1name
 		return nullptr;
 	}
 
-	duckdb_value val = duckdb_bind_get_named_parameter(bi, name_str.c_str());
-
-	return make_ptr_buf(env, val);
+	// same as in C API v1, the named parameters that were not passed are reported as absent
+	for (auto &param : bi->named_parameters) {
+		auto &param_name = param.first;
+		bool equal =
+		    param_name.size() == name_str.size() &&
+		    std::equal(param_name.begin(), param_name.end(), name_str.begin(), [](char a, char b) {
+			    return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+		    });
+		if (!equal) {
+			continue;
+		}
+		try {
+			auto &factory = default_factory();
+			auto val = new cxx::Value(param.second.Cast(factory, param.second.GetLogicalType()));
+			jobject buf = make_ptr_buf(env, val);
+			if (buf == nullptr) {
+				delete val;
+			}
+			return buf;
+		} catch (const std::exception &e) {
+			throw_sql_exception(env, e);
+			return nullptr;
+		}
+	}
+	return nullptr;
 }
 
 /*
@@ -122,7 +173,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1bind_1d
 		return;
 	}
 
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -132,7 +183,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1bind_1d
 		return;
 	}
 
-	duckdb_bind_set_bind_data(bi, bind_data_holder.release(), GlobalRefHolder::destroy_table_function_state);
+	bi->bind_data = std::unique_ptr<TableFunctionState>(new TableFunctionState(bind_data_holder.release()));
 }
 
 /*
@@ -144,7 +195,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1cardina
                                                                                      jobject bind_info,
                                                                                      jlong cardinality,
                                                                                      jboolean is_exact) {
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -154,7 +205,11 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1cardina
 	}
 	bool exact = !!is_exact;
 
-	duckdb_bind_set_cardinality(bi, cardinality_idx, exact);
+	try {
+		bi->input.SetCardinality(cardinality_idx, exact);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+	}
 }
 
 /*
@@ -164,7 +219,7 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1cardina
  */
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1error(JNIEnv *env, jclass, jobject bind_info,
                                                                                jbyteArray error) {
-	duckdb_bind_info bi = bind_info_buf_to_bind_info(env, bind_info);
+	auto bi = bind_info_buf_to_bind_info(env, bind_info);
 	if (env->ExceptionCheck()) {
 		return;
 	}
@@ -173,5 +228,6 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1bind_1set_1error(J
 		return;
 	}
 
-	duckdb_bind_set_error(bi, error_str.c_str());
+	bi->has_error = true;
+	bi->error = error_str;
 }

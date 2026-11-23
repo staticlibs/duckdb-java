@@ -1,9 +1,8 @@
 #pragma once
 
-extern "C" {
-#include "duckdb.h"
-}
+#include "cxx_api.hpp"
 #include "duckdb.hpp"
+#include "duckdb/main/capi_v2/capi_v2_internal.hpp"
 #include "refs.hpp"
 
 #include <jni.h>
@@ -40,13 +39,16 @@ struct ArrowStreamState {
  * Connection is unique to this holder. Every Java DuckDBConnection has exactly 1 of these holders, and they are never
  * shared. The holder is freed when the DuckDBConnection is closed. When the last holder sharing a DuckDB is freed, the
  * DuckDB is released as well.
+ *
+ * The connection is created as a capiv2::CV2Connection (that is a duckdb::Connection) so it can also be used as
+ * a connection handle of the C API v2 and wrapped into a (non-owning) cxx::Connection of the C++ API.
  */
 struct ConnectionHolder {
 	const duckdb::shared_ptr<duckdb::DuckDB> db;
-	const duckdb::unique_ptr<duckdb::Connection> connection;
+	const duckdb::unique_ptr<duckdb::capiv2::CV2Connection> connection;
 
 	ConnectionHolder(duckdb::shared_ptr<duckdb::DuckDB> _db)
-	    : db(_db), connection(duckdb::make_uniq<duckdb::Connection>(*_db)) {
+	    : db(_db), connection(duckdb::make_uniq<duckdb::capiv2::CV2Connection>(*_db)) {
 	}
 
 	~ConnectionHolder() {
@@ -80,6 +82,28 @@ struct ResultHolder {
 	duckdb::unique_ptr<duckdb::QueryResult> res;
 	duckdb::unique_ptr<duckdb::QueryResultStream<>> stream;
 	duckdb::unique_ptr<duckdb::DataChunk> chunk;
+};
+
+/**
+ * Result of a prepared statement execution that is read by chunks (see DuckDBChunkedResult) using C++ API.
+ * The column names and types are captured when the result is created, the error is set when fetching of
+ * a chunk fails, same as with the C API v1 result.
+ */
+struct ChunkedResultHolder {
+	cxx::QueryResult result;
+	std::vector<std::string> column_names;
+	std::vector<capi_type> column_types;
+	bool has_error = false;
+	std::string error;
+
+	explicit ChunkedResultHolder(cxx::QueryResult result_p) : result(std::move(result_p)) {
+		auto schema = result.GetSchema();
+		idx_t count = schema.GetFieldCount();
+		for (idx_t i = 0; i < count; i++) {
+			column_names.emplace_back(schema.GetFieldName(i));
+			column_types.push_back(logical_type_to_capi(schema.GetFieldType(i)));
+		}
+	}
 };
 
 struct AttachedJNIEnv {
@@ -123,4 +147,13 @@ ConnectionHolder *get_connection_ref(JNIEnv *env, jobject conn_ref_buf);
 
 duckdb::Connection *get_connection(JNIEnv *env, jobject conn_ref_buf);
 
-duckdb_connection conn_ref_buf_to_conn(JNIEnv *env, jobject conn_ref_buf);
+/**
+ * Throws a SQLException and returns nullptr if a valid Connection can't be retrieved from the buffer.
+ */
+duckdb::capiv2::CV2Connection *conn_ref_buf_to_engine_conn(JNIEnv *env, jobject conn_ref_buf);
+
+/**
+ * Returns a non-owning C++ API connection wrapping the connection of the specified holder. Throws a SQLException
+ * and returns nullptr if a valid Connection can't be retrieved from the buffer.
+ */
+std::unique_ptr<cxx::Connection> conn_ref_buf_to_conn(JNIEnv *env, jobject conn_ref_buf);

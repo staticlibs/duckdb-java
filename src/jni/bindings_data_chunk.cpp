@@ -4,14 +4,14 @@
 
 #include <vector>
 
-duckdb_data_chunk chunk_buf_to_chunk(JNIEnv *env, jobject chunk_buf) {
+DataChunkHolder *chunk_buf_to_chunk(JNIEnv *env, jobject chunk_buf) {
 
 	if (chunk_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid data chunk buffer");
 		return nullptr;
 	}
 
-	duckdb_data_chunk chunk = reinterpret_cast<duckdb_data_chunk>(env->GetDirectBufferAddress(chunk_buf));
+	auto chunk = reinterpret_cast<DataChunkHolder *>(env->GetDirectBufferAddress(chunk_buf));
 
 	if (chunk == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid data chunk");
@@ -19,6 +19,18 @@ duckdb_data_chunk chunk_buf_to_chunk(JNIEnv *env, jobject chunk_buf) {
 	}
 
 	return chunk;
+}
+
+jobject make_data_chunk_buf(JNIEnv *env, cxx::DataChunk chunk) {
+	if (!chunk) {
+		return nullptr;
+	}
+	auto dc = new DataChunkHolder(std::move(chunk));
+	jobject buf = make_ptr_buf(env, dc);
+	if (buf == nullptr) {
+		delete dc;
+	}
+	return buf;
 }
 
 /*
@@ -36,7 +48,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1data_1c
 
 	size_t column_count = static_cast<size_t>(env->GetArrayLength(logical_types));
 
-	std::vector<duckdb_logical_type> lt_vec;
+	std::vector<cxx::LogicalType *> lt_vec;
 	lt_vec.reserve(column_count);
 
 	for (size_t i = 0; i < column_count; i++) {
@@ -46,7 +58,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1data_1c
 			return nullptr;
 		}
 
-		duckdb_logical_type lt = logical_type_buf_to_logical_type(env, lt_buf);
+		auto lt = logical_type_buf_to_logical_type(env, lt_buf);
 		env->DeleteLocalRef(lt_buf);
 		if (env->ExceptionCheck()) {
 			return nullptr;
@@ -55,9 +67,22 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1data_1c
 		lt_vec.push_back(lt);
 	}
 
-	duckdb_data_chunk data_chunk = duckdb_create_data_chunk(lt_vec.data(), static_cast<idx_t>(column_count));
-
-	return make_ptr_buf(env, data_chunk);
+	try {
+		std::vector<cxx::LogicalType> types;
+		types.reserve(column_count);
+		for (auto lt : lt_vec) {
+			// same as in C API v1, INVALID types (represented with empty handles) are rejected,
+			// ANY types are rejected when the chunk is created
+			if (!*lt) {
+				return nullptr;
+			}
+			types.emplace_back(lt->Copy());
+		}
+		cxx::DataChunk data_chunk(default_factory(), types);
+		return make_data_chunk_buf(env, std::move(data_chunk));
+	} catch (const std::exception &) {
+		return nullptr;
+	}
 }
 
 /*
@@ -67,12 +92,12 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1data_1c
  */
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1data_1chunk(JNIEnv *env, jclass, jobject chunk) {
 
-	duckdb_data_chunk dc = chunk_buf_to_chunk(env, chunk);
+	auto dc = chunk_buf_to_chunk(env, chunk);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_destroy_data_chunk(&dc);
+	delete dc;
 }
 
 /*
@@ -82,12 +107,21 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1data_1chu
  */
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1reset(JNIEnv *env, jclass, jobject chunk) {
 
-	duckdb_data_chunk dc = chunk_buf_to_chunk(env, chunk);
+	auto dc = chunk_buf_to_chunk(env, chunk);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_data_chunk_reset(dc);
+	try {
+		if (dc->chunk) {
+			dc->chunk.Clear();
+		}
+		if (dc->has_row_count) {
+			dc->row_count = 0;
+		}
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+	}
 }
 
 /*
@@ -98,14 +132,18 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1reset
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1get_1column_1count(JNIEnv *env, jclass,
                                                                                                jobject chunk) {
 
-	duckdb_data_chunk dc = chunk_buf_to_chunk(env, chunk);
+	auto dc = chunk_buf_to_chunk(env, chunk);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	idx_t count = duckdb_data_chunk_get_column_count(dc);
-
-	return static_cast<jlong>(count);
+	try {
+		idx_t count = dc->GetColumnCount();
+		return static_cast<jlong>(count);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -117,7 +155,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1ge
                                                                                           jobject chunk,
                                                                                           jlong col_idx) {
 
-	duckdb_data_chunk dc = chunk_buf_to_chunk(env, chunk);
+	auto dc = chunk_buf_to_chunk(env, chunk);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -127,9 +165,17 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1ge
 		return nullptr;
 	}
 
-	duckdb_vector vec = duckdb_data_chunk_get_vector(dc, idx);
-
-	return make_ptr_buf(env, vec);
+	try {
+		if (idx >= dc->GetColumnCount()) {
+			return nullptr;
+		}
+		cxx::Vector vec = dc->chunk.GetVector(idx);
+		// vectors are borrowed from their chunk, the underlying handle is passed to Java
+		return make_ptr_buf(env, cxx_raw_handle(vec));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }
 
 /*
@@ -140,14 +186,18 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1ge
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1get_1size(JNIEnv *env, jclass,
                                                                                       jobject chunk) {
 
-	duckdb_data_chunk dc = chunk_buf_to_chunk(env, chunk);
+	auto dc = chunk_buf_to_chunk(env, chunk);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	idx_t dc_size = duckdb_data_chunk_get_size(dc);
-
-	return static_cast<jlong>(dc_size);
+	try {
+		idx_t dc_size = dc->GetRowCount();
+		return static_cast<jlong>(dc_size);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -158,10 +208,21 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1get_
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1data_1chunk_1set_1size(JNIEnv *env, jclass, jobject chunk,
                                                                                      jlong size) {
 
-	duckdb_data_chunk dc = chunk_buf_to_chunk(env, chunk);
+	auto dc = chunk_buf_to_chunk(env, chunk);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_data_chunk_set_size(dc, static_cast<idx_t>(size));
+	try {
+		// The C++ API derives the row count of a chunk from its vectors, so the size is set on every vector
+		idx_t count = dc->GetColumnCount();
+		for (idx_t i = 0; i < count; i++) {
+			dc->chunk.GetVector(i).SetSize(static_cast<idx_t>(size));
+		}
+		if (dc->has_row_count) {
+			dc->row_count = static_cast<idx_t>(size);
+		}
+	} catch (const std::exception &) {
+		// same as in C API v1, errors are not reported here
+	}
 }

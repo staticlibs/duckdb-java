@@ -5,21 +5,35 @@
 #include <cstring>
 #include <vector>
 
-duckdb_logical_type logical_type_buf_to_logical_type(JNIEnv *env, jobject logical_type_buf) {
+void throw_sql_exception(JNIEnv *env, const std::exception &e) {
+	if (!env->ExceptionCheck()) {
+		env->ThrowNew(J_SQLException, e.what());
+	}
+}
+
+cxx::LogicalType *logical_type_buf_to_logical_type(JNIEnv *env, jobject logical_type_buf) {
 
 	if (logical_type_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid logical type buffer");
 		return nullptr;
 	}
 
-	duckdb_logical_type logical_type =
-	    reinterpret_cast<duckdb_logical_type>(env->GetDirectBufferAddress(logical_type_buf));
+	auto logical_type = reinterpret_cast<cxx::LogicalType *>(env->GetDirectBufferAddress(logical_type_buf));
 	if (logical_type == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid logical type");
 		return nullptr;
 	}
 
 	return logical_type;
+}
+
+jobject make_logical_type_buf(JNIEnv *env, cxx::LogicalType logical_type) {
+	auto lt = new cxx::LogicalType(std::move(logical_type));
+	jobject buf = make_ptr_buf(env, lt);
+	if (buf == nullptr) {
+		delete lt;
+	}
+	return buf;
 }
 
 /*
@@ -29,11 +43,38 @@ duckdb_logical_type logical_type_buf_to_logical_type(JNIEnv *env, jobject logica
  */
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1logical_1type(JNIEnv *env, jclass, jint type) {
 
-	duckdb_type dt = static_cast<duckdb_type>(type);
+	// same as in C API v1, types that require parameters cannot be created from type ID alone and
+	// are reported as INVALID, INVALID type is represented with an empty handle
+	cxx::LogicalTypeId type_id = cxx::LogicalTypeId::INVALID;
+	if (!type_id_from_capi(static_cast<int32_t>(type), type_id)) {
+		return make_logical_type_buf(env, empty_logical_type());
+	}
+	switch (type_id) {
+	case cxx::LogicalTypeId::DECIMAL:
+	case cxx::LogicalTypeId::ENUM:
+	case cxx::LogicalTypeId::LIST:
+	case cxx::LogicalTypeId::STRUCT:
+	case cxx::LogicalTypeId::MAP:
+	case cxx::LogicalTypeId::ARRAY:
+	case cxx::LogicalTypeId::UNION:
+		return make_logical_type_buf(env, empty_logical_type());
+	default:
+		break;
+	}
 
-	duckdb_logical_type lt = duckdb_create_logical_type(dt);
-
-	return make_ptr_buf(env, lt);
+	try {
+		auto &factory = default_factory();
+		if (type_id == cxx::LogicalTypeId::VARIANT || type_id == cxx::LogicalTypeId::GEOMETRY) {
+			// these types cannot be created from type ID without parameters, their default variants
+			// are created from their names
+			auto name = type_id == cxx::LogicalTypeId::VARIANT ? "VARIANT" : "GEOMETRY";
+			return make_logical_type_buf(env, factory.ParseType(name));
+		}
+		cxx::LogicalType lt = factory.CreateType(type_id);
+		return make_logical_type_buf(env, std::move(lt));
+	} catch (const std::exception &) {
+		return make_logical_type_buf(env, empty_logical_type());
+	}
 }
 
 /*
@@ -52,8 +93,16 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1decimal
 		env->ThrowNew(J_SQLException, "Invalid decimal scale: expected 0..width");
 		return nullptr;
 	}
-	duckdb_logical_type lt = duckdb_create_decimal_type(static_cast<uint8_t>(width), static_cast<uint8_t>(scale));
-	return make_ptr_buf(env, lt);
+	try {
+		auto &factory = default_factory();
+		std::vector<cxx::TypeParam> params;
+		params.emplace_back(factory.CreateValue(static_cast<uint8_t>(width)));
+		params.emplace_back(factory.CreateValue(static_cast<uint8_t>(scale)));
+		cxx::LogicalType lt = factory.CreateType(cxx::LogicalTypeId::DECIMAL, params);
+		return make_logical_type_buf(env, std::move(lt));
+	} catch (const std::exception &) {
+		return nullptr;
+	}
 }
 
 /*
@@ -63,14 +112,17 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1decimal
  */
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1type_1id(JNIEnv *env, jclass, jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return 1;
 	}
 
-	duckdb_type type_id = duckdb_get_type_id(lt);
-
-	return static_cast<jint>(type_id);
+	try {
+		return static_cast<jint>(logical_type_to_capi(*lt));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return 1;
+	}
 }
 
 /*
@@ -81,14 +133,22 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1type_1id(JNIE
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1decimal_1width(JNIEnv *env, jclass,
                                                                              jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	uint8_t width = duckdb_decimal_width(lt);
-
-	return static_cast<jint>(width);
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::DECIMAL) {
+			return 0;
+		}
+		uint32_t width = lt->GetDecimalWidth();
+		// same as in C API v1, wider decimals report 0
+		return width > UINT8_MAX ? 0 : static_cast<jint>(width);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -99,14 +159,24 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1decimal_1width(JNI
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1decimal_1scale(JNIEnv *env, jclass,
                                                                              jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	uint8_t scale = duckdb_decimal_scale(lt);
-
-	return static_cast<jint>(scale);
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::DECIMAL) {
+			return 0;
+		}
+		if (lt->GetDecimalWidth() > UINT8_MAX) {
+			return 0;
+		}
+		uint32_t scale = lt->GetDecimalScale();
+		return scale > UINT8_MAX ? 0 : static_cast<jint>(scale);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -117,14 +187,29 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1decimal_1scale(JNI
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1decimal_1internal_1type(JNIEnv *env, jclass,
                                                                                       jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	duckdb_type type_id = duckdb_decimal_internal_type(lt);
-
-	return static_cast<jint>(type_id);
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::DECIMAL) {
+			return static_cast<jint>(capi_type::INVALID);
+		}
+		switch (lt->GetDecimalInternalTypeId()) {
+		case cxx::LogicalTypeId::SMALLINT:
+		case cxx::LogicalTypeId::INTEGER:
+		case cxx::LogicalTypeId::BIGINT:
+		case cxx::LogicalTypeId::HUGEINT:
+		case cxx::LogicalTypeId::BIGNUM:
+			return static_cast<jint>(type_id_to_capi(lt->GetDecimalInternalTypeId()));
+		default:
+			return static_cast<jint>(capi_type::INVALID);
+		}
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -135,14 +220,23 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1decimal_1internal_
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1list_1type(JNIEnv *env, jclass,
                                                                                     jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	duckdb_logical_type list_type = duckdb_create_list_type(lt);
-
-	return make_ptr_buf(env, list_type);
+	try {
+		if (!*lt) {
+			return nullptr;
+		}
+		auto &factory = default_factory();
+		std::vector<cxx::TypeParam> params;
+		params.emplace_back(factory.CreateValue(*lt));
+		cxx::LogicalType list_type = factory.CreateType(cxx::LogicalTypeId::LIST, params);
+		return make_logical_type_buf(env, std::move(list_type));
+	} catch (const std::exception &) {
+		return nullptr;
+	}
 }
 
 /*
@@ -154,7 +248,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1array_1
                                                                                      jobject logical_type,
                                                                                      jlong array_size) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -163,9 +257,19 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1array_1
 		return nullptr;
 	}
 
-	duckdb_logical_type array_type = duckdb_create_array_type(lt, size_idx);
-
-	return make_ptr_buf(env, array_type);
+	try {
+		if (!*lt) {
+			return nullptr;
+		}
+		auto &factory = default_factory();
+		std::vector<cxx::TypeParam> params;
+		params.emplace_back(factory.CreateValue(*lt));
+		params.emplace_back(factory.CreateValue(static_cast<uint64_t>(size_idx)));
+		cxx::LogicalType array_type = factory.CreateType(cxx::LogicalTypeId::ARRAY, params);
+		return make_logical_type_buf(env, std::move(array_type));
+	} catch (const std::exception &) {
+		return nullptr;
+	}
 }
 
 /*
@@ -193,7 +297,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1struct_
 		return nullptr;
 	}
 
-	std::vector<duckdb_logical_type> mt_vec;
+	std::vector<cxx::LogicalType *> mt_vec;
 	mt_vec.reserve(member_count);
 
 	for (size_t i = 0; i < member_count; i++) {
@@ -205,7 +309,7 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1struct_
 			env->ThrowNew(J_SQLException, "Invalid null type specified");
 			return nullptr;
 		}
-		duckdb_logical_type lt = logical_type_buf_to_logical_type(env, lt_buf);
+		auto lt = logical_type_buf_to_logical_type(env, lt_buf);
 		env->DeleteLocalRef(lt_buf);
 		if (env->ExceptionCheck()) {
 			return nullptr;
@@ -215,8 +319,6 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1struct_
 
 	std::vector<std::string> names_vec;
 	names_vec.reserve(member_count);
-	std::vector<const char *> names_cstr_vec;
-	names_cstr_vec.reserve(member_count);
 
 	for (size_t i = 0; i < member_count; i++) {
 		jbyteArray jba = reinterpret_cast<jbyteArray>(env->GetObjectArrayElement(member_names, i));
@@ -233,14 +335,44 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1struct_
 			return nullptr;
 		}
 		names_vec.emplace_back(std::move(str));
-		std::string &str_ref = names_vec.back();
-		names_cstr_vec.emplace_back(str_ref.c_str());
 	}
 
-	duckdb_logical_type struct_type =
-	    duckdb_create_struct_type(mt_vec.data(), names_cstr_vec.data(), static_cast<idx_t>(member_count));
+	try {
+		auto &factory = default_factory();
+		std::vector<cxx::TypeParam> params;
+		params.reserve(member_count);
+		bool unnamed = true;
+		for (size_t i = 0; i < member_count; i++) {
+			if (!*mt_vec[i]) {
+				return nullptr;
+			}
+			if (!names_vec[i].empty()) {
+				unnamed = false;
+			}
+			params.emplace_back(names_vec[i], factory.CreateValue(*mt_vec[i]));
+		}
+		// same as in C API v1, an unnamed (empty member names) struct is a TUPLE
+		auto type_id = unnamed && member_count > 0 ? cxx::LogicalTypeId::TUPLE : cxx::LogicalTypeId::STRUCT;
+		cxx::LogicalType struct_type = factory.CreateType(type_id, params);
+		return make_logical_type_buf(env, std::move(struct_type));
+	} catch (const std::exception &) {
+		return nullptr;
+	}
+}
 
-	return make_ptr_buf(env, struct_type);
+/*
+ * Returns the number of struct children, the same way as C API v1, that considers the hidden "tag" field
+ * of a UNION as its first child.
+ */
+static idx_t struct_type_child_count(const cxx::LogicalType &lt) {
+	switch (logical_type_to_capi(lt)) {
+	case capi_type::STRUCT:
+		return lt.GetStructChildCount();
+	case capi_type::UNION:
+		return lt.GetUnionMemberCount() + 1;
+	default:
+		return 0;
+	}
 }
 
 /*
@@ -251,14 +383,18 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1create_1struct_
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1type_1child_1count(JNIEnv *env, jclass,
                                                                                           jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	idx_t count = duckdb_struct_type_child_count(lt);
-
-	return static_cast<jlong>(count);
+	try {
+		idx_t count = struct_type_child_count(*lt);
+		return static_cast<jlong>(count);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -270,7 +406,7 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1type
                                                                                               jobject logical_type,
                                                                                               jlong index) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -279,20 +415,26 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1type
 		return nullptr;
 	}
 
-	idx_t count = duckdb_struct_type_child_count(lt);
-	if (index_idx >= count) {
-		env->ThrowNew(J_SQLException, "Invalid struct field index specified");
+	try {
+		idx_t count = struct_type_child_count(*lt);
+		if (index_idx >= count) {
+			env->ThrowNew(J_SQLException, "Invalid struct field index specified");
+			return nullptr;
+		}
+
+		std::string name;
+		if (logical_type_to_capi(*lt) == capi_type::UNION) {
+			// the hidden "tag" field of a UNION has an empty name
+			name = index_idx == 0 ? std::string() : lt->GetUnionMemberName(index_idx - 1);
+		} else {
+			name = lt->GetStructChildName(index_idx);
+		}
+
+		return make_jbyteArray(env, name.data(), static_cast<idx_t>(name.length()));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
 		return nullptr;
 	}
-
-	auto name_ptr = varchar_ptr(duckdb_struct_type_child_name(lt, index_idx), varchar_deleter);
-	if (name_ptr.get() == nullptr) {
-		return nullptr;
-	}
-
-	idx_t len = static_cast<idx_t>(std::strlen(name_ptr.get()));
-
-	return make_jbyteArray(env, name_ptr.get(), len);
 }
 
 /*
@@ -303,14 +445,21 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1struct_1type
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1array_1type_1array_1size(JNIEnv *env, jclass,
                                                                                         jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	idx_t size = duckdb_array_type_array_size(lt);
-
-	return static_cast<jlong>(size);
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::ARRAY) {
+			return 0;
+		}
+		idx_t size = lt->GetArraySize();
+		return static_cast<jlong>(size);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -321,14 +470,27 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1array_1type_1arra
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1enum_1internal_1type(JNIEnv *env, jclass,
                                                                                    jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	duckdb_type type_id = duckdb_enum_internal_type(lt);
-
-	return static_cast<jint>(type_id);
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::ENUM) {
+			return static_cast<jint>(capi_type::INVALID);
+		}
+		switch (lt->GetEnumInternalTypeId()) {
+		case cxx::LogicalTypeId::UTINYINT:
+		case cxx::LogicalTypeId::USMALLINT:
+		case cxx::LogicalTypeId::UINTEGER:
+			return static_cast<jint>(type_id_to_capi(lt->GetEnumInternalTypeId()));
+		default:
+			return static_cast<jint>(capi_type::INVALID);
+		}
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -339,14 +501,21 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1enum_1internal_1ty
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1enum_1dictionary_1size(JNIEnv *env, jclass,
                                                                                       jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return -1;
 	}
 
-	idx_t size = duckdb_enum_dictionary_size(lt);
-
-	return static_cast<jlong>(size);
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::ENUM) {
+			return 0;
+		}
+		idx_t size = lt->GetEnumSize();
+		return static_cast<jlong>(size);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -358,7 +527,7 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1enum_1dictio
                                                                                             jobject logical_type,
                                                                                             jlong index) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
@@ -367,20 +536,24 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1enum_1dictio
 		return nullptr;
 	}
 
-	idx_t size = duckdb_enum_dictionary_size(lt);
-	if (index_idx >= size) {
-		env->ThrowNew(J_SQLException, "Invalid enum field index specified");
+	try {
+		if (logical_type_to_capi(*lt) != capi_type::ENUM) {
+			return nullptr;
+		}
+
+		idx_t size = lt->GetEnumSize();
+		if (index_idx >= size) {
+			env->ThrowNew(J_SQLException, "Invalid enum field index specified");
+			return nullptr;
+		}
+
+		std::string name = lt->GetEnumValue(index_idx);
+
+		return make_jbyteArray(env, name.data(), static_cast<idx_t>(name.length()));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
 		return nullptr;
 	}
-
-	auto name_ptr = varchar_ptr(duckdb_enum_dictionary_value(lt, index_idx), varchar_deleter);
-	if (name_ptr.get() == nullptr) {
-		return nullptr;
-	}
-
-	idx_t len = static_cast<idx_t>(std::strlen(name_ptr.get()));
-
-	return make_jbyteArray(env, name_ptr.get(), len);
 }
 
 /*
@@ -391,10 +564,10 @@ JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1enum_1dictio
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1logical_1type(JNIEnv *env, jclass,
                                                                                      jobject logical_type) {
 
-	duckdb_logical_type lt = logical_type_buf_to_logical_type(env, logical_type);
+	auto lt = logical_type_buf_to_logical_type(env, logical_type);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_destroy_logical_type(&lt);
+	delete lt;
 }

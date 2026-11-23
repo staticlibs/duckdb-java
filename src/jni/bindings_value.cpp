@@ -2,16 +2,18 @@
 #include "refs.hpp"
 #include "util.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
-static duckdb_value value_buf_to_value(JNIEnv *env, jobject value_buf) {
+static cxx::Value *value_buf_to_value(JNIEnv *env, jobject value_buf) {
 	if (value_buf == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid value buffer");
 		return nullptr;
 	}
 
-	auto value = reinterpret_cast<duckdb_value>(env->GetDirectBufferAddress(value_buf));
+	auto value = reinterpret_cast<cxx::Value *>(env->GetDirectBufferAddress(value_buf));
 	if (value == nullptr) {
 		env->ThrowNew(J_SQLException, "Invalid value");
 		return nullptr;
@@ -20,17 +22,75 @@ static duckdb_value value_buf_to_value(JNIEnv *env, jobject value_buf) {
 }
 
 /*
+ * Same as in C API v1, the value is converted to the requested type and a "NULL value" of this type
+ * (see duckdb::NullValue) is returned if the conversion fails.
+ */
+template <class T>
+static T null_value() {
+	return T();
+}
+
+template <>
+int8_t null_value() {
+	return std::numeric_limits<int8_t>::min();
+}
+
+template <>
+int16_t null_value() {
+	return std::numeric_limits<int16_t>::min();
+}
+
+template <>
+int32_t null_value() {
+	return std::numeric_limits<int32_t>::min();
+}
+
+template <>
+int64_t null_value() {
+	return std::numeric_limits<int64_t>::min();
+}
+
+template <>
+cxx::int128_t null_value() {
+	return cxx::int128_t {0, std::numeric_limits<int64_t>::min()};
+}
+
+template <>
+cxx::uint128_t null_value() {
+	return cxx::uint128_t {0, 0};
+}
+
+template <>
+float null_value() {
+	return NAN;
+}
+
+template <>
+double null_value() {
+	return NAN;
+}
+
+template <class T>
+static T get_value(const cxx::Value &val) {
+	try {
+		return val.Get<T>();
+	} catch (const std::exception &) {
+		return null_value<T>();
+	}
+}
+
+/*
  * Class:     org_duckdb_DuckDBBindings
  * Method:    duckdb_is_null_value
  * Signature: (Ljava/nio/ByteBuffer;)Z
  */
 JNIEXPORT jboolean JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1is_1null_1value(JNIEnv *env, jclass, jobject value) {
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return false;
 	}
 
-	bool flag = duckdb_is_null_value(val);
+	bool flag = val->IsNull();
 	return static_cast<jboolean>(flag);
 }
 
@@ -41,14 +101,17 @@ JNIEXPORT jboolean JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1is_1null_1valu
  */
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1value_1type(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return 0;
 	}
 
-	duckdb_logical_type lt = duckdb_get_value_type(val);
-	duckdb_type dt = duckdb_get_type_id(lt);
-	return static_cast<jint>(dt);
+	try {
+		return static_cast<jint>(logical_type_to_capi(val->GetLogicalType()));
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return -1;
+	}
 }
 
 /*
@@ -58,12 +121,12 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1value_1type(J
  */
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1value(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return;
 	}
 
-	duckdb_destroy_value(&val);
+	delete val;
 }
 
 /*
@@ -73,11 +136,11 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1destroy_1value(JNI
  */
 JNIEXPORT jboolean JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1bool(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return false;
 	}
-	bool flag = duckdb_get_bool(val);
+	bool flag = get_value<bool>(*val);
 	return static_cast<jboolean>(flag);
 }
 
@@ -88,11 +151,11 @@ JNIEXPORT jboolean JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1bool(JNIE
  */
 JNIEXPORT jbyte JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int8(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jbyte>(0);
 	}
-	int8_t num = duckdb_get_int8(val);
+	int8_t num = get_value<int8_t>(*val);
 	return static_cast<jbyte>(num);
 }
 
@@ -103,11 +166,11 @@ JNIEXPORT jbyte JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int8(JNIEnv 
  */
 JNIEXPORT jshort JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint8(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jshort>(0);
 	}
-	uint8_t num = duckdb_get_uint8(val);
+	uint8_t num = get_value<uint8_t>(*val);
 	return static_cast<jshort>(num);
 }
 
@@ -118,11 +181,11 @@ JNIEXPORT jshort JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint8(JNIEn
  */
 JNIEXPORT jshort JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int16(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jshort>(0);
 	}
-	int16_t num = duckdb_get_int16(val);
+	int16_t num = get_value<int16_t>(*val);
 	return static_cast<jshort>(num);
 }
 
@@ -133,11 +196,11 @@ JNIEXPORT jshort JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int16(JNIEn
  */
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint16(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jint>(0);
 	}
-	uint16_t num = duckdb_get_uint16(val);
+	uint16_t num = get_value<uint16_t>(*val);
 	return static_cast<jint>(num);
 }
 
@@ -148,11 +211,11 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint16(JNIEnv
  */
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int32(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jint>(0);
 	}
-	int32_t num = duckdb_get_int32(val);
+	int32_t num = get_value<int32_t>(*val);
 	return static_cast<jint>(num);
 }
 
@@ -163,11 +226,11 @@ JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int32(JNIEnv 
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint32(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
-	uint32_t num = duckdb_get_uint32(val);
+	uint32_t num = get_value<uint32_t>(*val);
 	return static_cast<jlong>(num);
 }
 
@@ -178,11 +241,11 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint32(JNIEn
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int64(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
-	int64_t num = duckdb_get_int64(val);
+	int64_t num = get_value<int64_t>(*val);
 	return static_cast<jlong>(num);
 }
 
@@ -193,11 +256,11 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1int64(JNIEnv
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint64(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
-	uint64_t num = duckdb_get_uint64(val);
+	uint64_t num = get_value<uint64_t>(*val);
 	return static_cast<jlong>(num);
 }
 
@@ -208,11 +271,11 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uint64(JNIEn
  */
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1hugeint(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
-	duckdb_hugeint hi = duckdb_get_hugeint(val);
+	cxx::int128_t hi = get_value<cxx::int128_t>(*val);
 	jlong lower = static_cast<jlong>(hi.lower);
 	jlong upper = static_cast<jlong>(hi.upper);
 	return env->CallStaticObjectMethod(J_HugeInt, J_HugeInt_toBigInteger, lower, upper);
@@ -224,11 +287,11 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1hugeint(JN
  * Signature: (Ljava/nio/ByteBuffer;)Ljava/math/BigInteger;
  */
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1uhugeint(JNIEnv *env, jclass, jobject value) {
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
-	duckdb_uhugeint uhi = duckdb_get_uhugeint(val);
+	cxx::uint128_t uhi = get_value<cxx::uint128_t>(*val);
 	jlong lower = static_cast<jlong>(uhi.lower);
 	jlong upper = static_cast<jlong>(uhi.upper);
 	return env->CallStaticObjectMethod(J_HugeInt, J_HugeInt_toBigInteger, lower, upper);
@@ -252,11 +315,18 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1bignum(JNI
  */
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1decimal(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
-	duckdb_decimal dec = duckdb_get_decimal(val);
+	// same as in C API v1, zero is returned for non-decimal and NULL values and for the decimals
+	// that cannot be represented
+	cxx::Value::RuntimeDecimal dec {};
+	try {
+		dec = val->GetDecimal();
+	} catch (const std::exception &) {
+		dec = cxx::Value::RuntimeDecimal {};
+	}
 	jlong lower = static_cast<jlong>(dec.value.lower);
 	jlong upper = static_cast<jlong>(dec.value.upper);
 	jint scale = static_cast<jint>(dec.scale);
@@ -270,11 +340,11 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1decimal(JN
  */
 JNIEXPORT jfloat JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1float(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jfloat>(0);
 	}
-	float num = duckdb_get_float(val);
+	float num = get_value<float>(*val);
 	return static_cast<jfloat>(num);
 }
 
@@ -285,11 +355,11 @@ JNIEXPORT jfloat JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1float(JNIEn
  */
 JNIEXPORT jdouble JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1double(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jdouble>(0);
 	}
-	double num = duckdb_get_double(val);
+	double num = get_value<double>(*val);
 	return static_cast<jdouble>(num);
 }
 
@@ -299,11 +369,11 @@ JNIEXPORT jdouble JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1double(JNI
  * Signature: (Ljava/nio/ByteBuffer;)I
  */
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1date(JNIEnv *env, jclass, jobject value) {
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jint>(0);
 	}
-	duckdb_date dt = duckdb_get_date(val);
+	cxx::date_t dt = get_value<cxx::date_t>(*val);
 	return static_cast<jint>(dt.days);
 }
 
@@ -347,12 +417,12 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1time_1tz(JNI
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
 
-	duckdb_timestamp ts = duckdb_get_timestamp(val);
+	cxx::timestamp_t ts = get_value<cxx::timestamp_t>(*val);
 	return static_cast<jlong>(ts.micros);
 }
 
@@ -374,12 +444,12 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1t
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1s(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
 
-	duckdb_timestamp_s ts = duckdb_get_timestamp_s(val);
+	cxx::timestamp_s_t ts = get_value<cxx::timestamp_s_t>(*val);
 	return static_cast<jlong>(ts.seconds);
 }
 
@@ -390,12 +460,12 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1s
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1ms(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
 
-	duckdb_timestamp_ms ts = duckdb_get_timestamp_ms(val);
+	cxx::timestamp_ms_t ts = get_value<cxx::timestamp_ms_t>(*val);
 	return static_cast<jlong>(ts.millis);
 }
 
@@ -406,12 +476,12 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1m
  */
 JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1ns(JNIEnv *env, jclass, jobject value) {
 
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return static_cast<jlong>(0);
 	}
 
-	duckdb_timestamp_ns ts = duckdb_get_timestamp_ns(val);
+	cxx::timestamp_ns_t ts = get_value<cxx::timestamp_ns_t>(*val);
 	return static_cast<jlong>(ts.nanos);
 }
 
@@ -421,16 +491,27 @@ JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1timestamp_1n
  * Signature: (Ljava/nio/ByteBuffer;)[B
  */
 JNIEXPORT jbyteArray JNICALL Java_org_duckdb_DuckDBBindings_duckdb_1get_1varchar(JNIEnv *env, jclass, jobject value) {
-	duckdb_value val = value_buf_to_value(env, value);
+	cxx::Value *val = value_buf_to_value(env, value);
 	if (env->ExceptionCheck()) {
 		return nullptr;
 	}
 
-	char *cstr = duckdb_get_varchar(val);
-	idx_t len = static_cast<idx_t>(std::strlen(cstr));
-	jbyteArray result = make_jbyteArray(env, cstr, len);
-
-	duckdb_free(cstr);
-
-	return result;
+	try {
+		// same as in C API v1, the value is cast to VARCHAR
+		std::string str;
+		if (val->GetLogicalType().GetTypeId() == cxx::LogicalTypeId::VARCHAR) {
+			str = std::string(val->Get<cxx::varchar_t>().view());
+		} else {
+			auto &factory = default_factory();
+			auto varchar_type = factory.CreateType(cxx::LogicalTypeId::VARCHAR);
+			auto str_val = val->Cast(factory, varchar_type);
+			str = std::string(str_val.Get<cxx::varchar_t>().view());
+		}
+		// same as in C API v1, the string is returned up to the first NUL character
+		idx_t len = static_cast<idx_t>(std::strlen(str.c_str()));
+		return make_jbyteArray(env, str.c_str(), len);
+	} catch (const std::exception &e) {
+		throw_sql_exception(env, e);
+		return nullptr;
+	}
 }
